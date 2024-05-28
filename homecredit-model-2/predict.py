@@ -479,14 +479,10 @@ def predict(dataPath, pkl_path, ohe=None):
 
     df_test = feature_eng(**data_store)
     df_test = df_test.pipe(Pipeline.handle_dates).pipe(Utility.reduce_memory_usage, "df_train")
-    print("test data shape:\t", df_test.shape)
 
     df_test = df_test.select([col for col in train_col if col != "target"])
 
     df_test, cat_cols = to_pandas(df_test, cat_cols)
-
-
-    
         
     X_test = df_test.drop(columns=["WEEK_NUM"])
     case_ids = X_test["case_id"]
@@ -505,4 +501,3 @@ def predict(dataPath, pkl_path, ohe=None):
 data_path = "../../../data/home-credit-credit-risk-model-stability/parquet_files/test"
 pkl_path = "data.json"
 df_submission = predict(data_path, pkl_path)
-print("done")
