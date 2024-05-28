@@ -6,8 +6,6 @@ from glob import glob
 import pickle
 import gc
 from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.metrics import roc_auc_score 
-from typing import Any
 import json
 import warnings
 import base64
