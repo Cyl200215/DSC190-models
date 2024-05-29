@@ -1,0 +1,9 @@
+polars
+scikit-learn
+json5
+glob2
+gc3-query
+base64
+numpy==1.26.2
+pandas==2.2.1
+typing-extensions
