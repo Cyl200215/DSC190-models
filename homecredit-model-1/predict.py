@@ -1,19 +1,17 @@
 import polars as pl
 import numpy as np
 import pandas as pd
-import json
+import lightgbm as lgb
 from glob import glob
-import gc
 import pickle
-import base64
+import gc
 from sklearn.base import BaseEstimator, RegressorMixin
-from typing import Any
-
+import json
 import warnings
+import base64
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
-# Defining usuful functions
 def reduce_mem_usage(df):
     """ iterate through all the columns of a dataframe and modify the data type
         to reduce memory usage.        
@@ -163,17 +161,15 @@ class VotingModel(BaseEstimator, RegressorMixin):
         y_preds = [estimator.predict_proba(X) for estimator in self.estimators]
         return np.mean(y_preds, axis=0)
 
-
-# All preprocessing and prediction work
 def predict(dataPath, pkl_path):
 
-    # Open data.json file
     with open(pkl_path, 'r') as f:
         loaded_data = json.load(f)
 
 
-    cat_cols = loaded_data['cat_cols']
-    cols = loaded_data['cols']
+    cat_cols = loaded_data['cat_col']
+    df_train_cols = loaded_data['df_train_col']
+    uses = loaded_data['uses']
 
     def read_file(path, depth=None):
         df = pl.read_parquet(path)
@@ -216,75 +212,129 @@ def predict(dataPath, pkl_path):
         df_data[cat_cols] = df_data[cat_cols].astype("category")
         return df_data, cat_cols
     
-    
+
+    test_credit_bureau_a_1 = read_files(dataPath + "/test_credit_bureau_a_1_*.parquet", 1)
+    test_credit_bureau_a_1 = test_credit_bureau_a_1.with_columns(
+        ((pl.col('max_dateofcredend_289D') - pl.col('max_dateofcredstart_739D')).dt.total_days()).alias('max_credit_duration_daysA')
+    ).with_columns(
+        ((pl.col('max_dateofcredend_353D') - pl.col('max_dateofcredstart_181D')).dt.total_days()).alias('max_closed_credit_duration_daysA')
+    ).with_columns(
+        ((pl.col('max_dateofrealrepmt_138D') - pl.col('max_overdueamountmax2date_1002D')).dt.total_days()).alias('max_time_from_overdue_to_closed_realrepmtA')
+    ).with_columns(
+        ((pl.col('max_dateofrealrepmt_138D') - pl.col('max_overdueamountmax2date_1142D')).dt.total_days()).alias('max_time_from_active_overdue_to_realrepmtA')
+    )
+
+    test_credit_bureau_b_1 = read_file(dataPath + "/test_credit_bureau_b_1.parquet", 1)
+    test_credit_bureau_b_1 = test_credit_bureau_b_1.with_columns(
+        ((pl.col('max_contractmaturitydate_151D') - pl.col('max_contractdate_551D')).dt.total_days()).alias('contract_duration_days_A')
+    ).with_columns(
+        ((pl.col('max_lastupdate_260D') - pl.col('max_contractdate_551D')).dt.total_days()).alias('last_update_duration_days_A')
+    )
+
+    test_static = read_files(dataPath + "/test_static_0_*.parquet")
+    condition_all_nan = (
+        pl.col('maxdbddpdlast1m_3658939P').is_null() &
+        pl.col('maxdbddpdtollast12m_3658940P').is_null() &
+        pl.col('maxdbddpdtollast6m_4187119P').is_null()
+    )
+
+    condition_exceed_thresholds = (
+        (pl.col('maxdbddpdlast1m_3658939P') > 31) |
+        (pl.col('maxdbddpdtollast12m_3658940P') > 366) |
+        (pl.col('maxdbddpdtollast6m_4187119P') > 184)
+    )
+
+    test_static = test_static.with_columns(
+        pl.when(condition_all_nan | condition_exceed_thresholds)
+        .then(0)
+        .otherwise(1)
+        .alias('max_dbddpd_boolean_P')
+    )
+
+    test_static = test_static.with_columns(
+        pl.when(
+            (pl.col('maxdbddpdlast1m_3658939P') <= 0) &
+            (pl.col('maxdbddpdtollast12m_3658940P') <= 0) &
+            (pl.col('maxdbddpdtollast6m_4187119P') <= 0)
+        )
+        .then(1)
+        .otherwise(0)
+        .alias('max_pays_debt_on_time_P')
+    )
+
+    test_static = test_static.with_columns(
+        pl.when((pl.col('firstdatedue_489D') <= pl.col('datefirstoffer_1144D'))).then(1).otherwise(0).alias('firstdatedue_before_offer_P')
+    ).with_columns(
+        pl.when((pl.col('datelastunpaid_3546854D').is_null())).then(1).otherwise(0).alias('missed_payment_P')
+    ).with_columns(
+        pl.when((pl.col('maxdpdinstldate_3546855D').is_null())).then(1).otherwise(0).alias('late_payment_P')
+    ).with_columns(
+        pl.when((pl.col('lastdelinqdate_224D').is_null())).then(1).otherwise(0).alias('any_delinquency_P')
+    ).with_columns(
+        ((pl.col('dtlastpmtallstes_4499206D') - pl.col('datelastunpaid_3546854D')).dt.total_days()).alias('days_between_last_unpaid_and_last_payment_A')
+    ).with_columns(
+        ((pl.col('dtlastpmtallstes_4499206D') - pl.col('lastdelinqdate_224D')).dt.total_days()).alias('days_between_last_default_and_last_payment_A')
+    ).with_columns(
+        ((pl.col('datelastinstal40dpd_247D') - pl.col('firstdatedue_489D')).dt.total_days()).alias('days_between_first_and_last_installment_A')
+    ).with_columns(
+        ((pl.col('maxdpdinstldate_3546855D') - pl.col('lastdelinqdate_224D')).dt.total_days()).alias('days_between_max_dpd_and_last_default_A')
+    ).with_columns(
+        ((pl.col('maxdpdinstldate_3546855D') - pl.col('dtlastpmtallstes_4499206D')).dt.total_days()).alias('days_between_max_dpd_and_last_payment_A')
+    )
 
     # read test files
     data_store = {
-    "df_base": read_file(dataPath + "parquet_files/test/test_base.parquet"),
-    "depth_0": [
-        read_file(dataPath + "parquet_files/test/test_static_cb_0.parquet"),
-        read_files(dataPath + "parquet_files/test/test_static_0_*.parquet"),
-    ],
-    "depth_1": [
-        read_files(dataPath + "parquet_files/test/test_applprev_1_*.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_tax_registry_a_1.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_tax_registry_b_1.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_tax_registry_c_1.parquet", 1),
-        read_files(dataPath + "parquet_files/test/test_credit_bureau_a_1_*.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_credit_bureau_b_1.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_other_1.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_person_1.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_deposit_1.parquet", 1),
-        read_file(dataPath + "parquet_files/test/test_debitcard_1.parquet", 1),
-    ],
-    "depth_2": [
-        read_file(dataPath + "parquet_files/test/test_credit_bureau_b_2.parquet", 2),
-        read_files(dataPath + "parquet_files/test/test_credit_bureau_a_2_*.parquet", 2),
-        read_file(dataPath + "parquet_files/test/test_applprev_2.parquet", 2),
-        read_file(dataPath + "parquet_files/test/test_person_2.parquet", 2)
-    ]
-}
-
+        "df_base": read_file(dataPath + "/test_base.parquet"),
+        "depth_0": [
+            read_file(dataPath + "/test_static_cb_0.parquet"),
+            test_static,
+        ],
+        "depth_1": [
+            read_files(dataPath + "/test_applprev_1_*.parquet", 1),
+            read_file(dataPath + "/test_tax_registry_a_1.parquet", 1),
+            read_file(dataPath + "/test_tax_registry_b_1.parquet", 1),
+            read_file(dataPath + "/test_tax_registry_c_1.parquet", 1),
+            test_credit_bureau_a_1,
+            test_credit_bureau_b_1,
+            read_file(dataPath + "/test_other_1.parquet", 1),
+            read_file(dataPath + "/test_person_1.parquet", 1),
+            read_file(dataPath + "/test_deposit_1.parquet", 1),
+            read_file(dataPath + "/test_debitcard_1.parquet", 1),
+        ],
+        "depth_2": [
+            read_file(dataPath + "/test_credit_bureau_b_2.parquet", 2),
+        ]
+    }
 
     df_test = feature_eng(**data_store)
+    df_test = df_test.pipe(Pipeline.handle_dates)
     print("test data shape:\t", df_test.shape)
     del data_store
     gc.collect()
 
-    df_test = df_test.select(['case_id'] + cols)
+    df_test = df_test.with_columns(
+        pl.when((pl.col('dtlastpmtallstes_4499206D') <= 365)).then(1).otherwise(0).alias('pay_among_year_P')
+    ).with_columns(
+        pl.when((pl.col('dtlastpmtallstes_4499206D') <= 90)).then(1).otherwise(0).alias('pay_among_three_months_P')
+    )
 
+    df_test = df_test.select([col for col in df_train_cols if col != "target"])
     df_test, cat_cols = to_pandas(df_test, cat_cols)
     df_test = reduce_mem_usage(df_test)
+    df_test = df_test[[col for col in uses if col != "target"]].drop(columns = ['WEEK_NUM'])
+    case_ids = df_test["case_id"]
     df_test = df_test.set_index('case_id')
-    print("test data shape:\t", df_test.shape)
 
-    gc.collect()
-
-    # Load base
-    df_base = pd.read_parquet(f"{data_path}/test_base.parquet")
-    case_ids = df_base["case_id"]
-
-    cat_models = pickle.loads(base64.b64decode(loaded_data['cat_models_base64'].encode('utf-8')))
-    lgb_models = pickle.loads(base64.b64decode(loaded_data['lgb_models_base64'].encode('utf-8')))
-    # score = model.predict_proba(df_test)[:, 1]
+    model = pickle.loads(base64.b64decode(loaded_data['model'].encode('utf-8')))
+    score = model.predict_proba(df_test)[:, 1]
     
-    model = VotingModel(lgb_models + cat_models)
-    len(model.estimators)
-
-    y_pred = pd.Series(model.predict_proba(df_test)[:, 1], index=df_test.index)
-    # df_subm = pd.read_csv(dataPath + "sample_submission.csv")
-    # df_subm = df_subm.set_index("case_id")
-
-    # df_subm["score"] = y_pred
-    # df_subm.to_csv("submission.csv")
-
     df_submission = pd.DataFrame({
         "case_id": case_ids,
-        "score": y_pred
+        "score": score
     }).set_index('case_id')
 
     return df_submission
 
 data_path = "../../../data/home-credit-credit-risk-model-stability/parquet_files/test"
-pkl_path = "homecredit-model-1\data_full.json"
+pkl_path = "data.json"
 df_submission = predict(data_path, pkl_path)

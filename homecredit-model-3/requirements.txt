@@ -1,5 +1,7 @@
 polars-lts-cpu==0.20.20
-numpy
-pandas
-lightgbm
 scikit-learn
+numpy==1.26.4
+pandas==2.2.2
+gdown
+lightgbm
+catboost
